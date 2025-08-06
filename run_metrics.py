@@ -65,6 +65,37 @@ def get_features(dl, model, metric_type, device, model_subtype="styleganv"):
         feats.append(pred.cpu().numpy())
     return np.concatenate(feats, axis=0)
 
+def truncate_video(input_path, output_path, frame_limit):
+    """Reads a video, writes the first `frame_limit` frames to a new video file."""
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        print(f"    Error: Could not open video file for reading: {input_path}")
+        return False
+    
+    # Get video properties to create a writer
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    if not out.isOpened():
+        print(f"    Error: Could not open video file for writing: {output_path}")
+        cap.release()
+        return False
+
+    frame_num = 0
+    while frame_num < frame_limit:
+        ret, frame = cap.read()
+        if not ret:
+            break # Reached end of video before frame_limit
+        out.write(frame)
+        frame_num += 1
+    
+    cap.release()
+    out.release()
+    return True
+
 def sample_video_frames(input_path, output_path, num_frames):
     """
     Reads a video and writes a new video file with `num_frames` uniformly sampled frames.
@@ -161,8 +192,7 @@ def run(args):
     fvd_data_cfg = OmegaConf.create({
         "dataset": {
             "sequence_length": 16, 
-            "resize_shape": [224, 224],
-            "no_overlap": False  # Enable overlapping sequences for better data utilization
+            "resize_shape": [224, 224]
         },
         "batch_size": 4, "num_workers": 1
     })
@@ -176,7 +206,7 @@ def run(args):
         os.makedirs(gen_dataset_path, exist_ok=True)
         
         video_files = sorted(glob.glob(os.path.join(real_dataset_path, '*.mp4')))
-        video_files = video_files[:NUM_VIDEOS_TO_PROCESS]
+        video_files = video_files[:]
         print(f"  Processing {len(video_files)} videos in this dataset...")
 
         for real_video_path in video_files:
@@ -213,7 +243,7 @@ def run(args):
 
             temp_files_to_clean = []
             try:
-                # --- Frame Count Matching ---
+                # --- Step 1: Uniformly sample longer video to match shorter one ---
                 real_cap = cv2.VideoCapture(real_video_path)
                 real_frame_count = int(real_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 real_cap.release()
@@ -222,38 +252,56 @@ def run(args):
                 gen_frame_count = int(gen_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 gen_cap.release()
                 
+                if real_frame_count == 0 or gen_frame_count == 0:
+                    raise ValueError("One of the videos has 0 frames.")
+
                 target_frame_count = min(real_frame_count, gen_frame_count)
 
-                path_for_real = real_video_path
-                path_for_gen = gen_video_path
+                path_for_real_sampled = real_video_path
+                path_for_gen_sampled = gen_video_path
 
                 if real_frame_count > target_frame_count:
                     print(f"    Sampling real video from {real_frame_count} to {target_frame_count} frames.")
-                    path_for_real = os.path.join(gen_dataset_path, f"temp_real_{video_filename}")
-                    temp_files_to_clean.append(path_for_real)
-                    if not sample_video_frames(real_video_path, path_for_real, target_frame_count):
+                    path_for_real_sampled = os.path.join(gen_dataset_path, f"temp_sampled_real_{video_filename}")
+                    temp_files_to_clean.append(path_for_real_sampled)
+                    if not sample_video_frames(real_video_path, path_for_real_sampled, target_frame_count):
                         raise IOError(f"Failed to sample real video: {real_video_path}")
                 
                 if gen_frame_count > target_frame_count:
                     print(f"    Sampling generated video from {gen_frame_count} to {target_frame_count} frames.")
-                    path_for_gen = os.path.join(gen_dataset_path, f"temp_gen_{video_filename}")
-                    temp_files_to_clean.append(path_for_gen)
-                    if not sample_video_frames(gen_video_path, path_for_gen, target_frame_count):
+                    path_for_gen_sampled = os.path.join(gen_dataset_path, f"temp_sampled_gen_{video_filename}")
+                    temp_files_to_clean.append(path_for_gen_sampled)
+                    if not sample_video_frames(gen_video_path, path_for_gen_sampled, target_frame_count):
                         raise IOError(f"Failed to sample generated video: {gen_video_path}")
 
-                paths = [path_for_real, path_for_gen]
+                # --- Step 2: Truncate the sampled videos to their first 16 frames ---
+                print("    Creating 16-frame clips from sampled videos for metrics.")
+                temp_real_final = os.path.join(gen_dataset_path, f"temp_final_real_{video_filename}")
+                temp_gen_final = os.path.join(gen_dataset_path, f"temp_final_gen_{video_filename}")
+                temp_files_to_clean.extend([temp_real_final, temp_gen_final])
+
+                if not truncate_video(path_for_real_sampled, temp_real_final, 16):
+                    raise IOError(f"Failed to truncate real video: {path_for_real_sampled}")
+                if not truncate_video(path_for_gen_sampled, temp_gen_final, 16):
+                    raise IOError(f"Failed to truncate generated video: {path_for_gen_sampled}")
                 
-                # --- Calculate FID ---
+                paths = [temp_real_final, temp_gen_final]
+
+                # FID feature shape
+                print(f"    FID feature shape: {real_fid_feats.shape}")
+                print(f"    FVD feature shape: {real_fvd_feats.shape}")
+                
+                # --- Calculate FID (first 16 frames of sampled videos) ---
                 fid_loaders = build_loaders('fid', paths, fid_data_cfg)
                 real_fid_feats = get_features(fid_loaders[0], fid_model, 'fid', device)
                 gen_fid_feats = get_features(fid_loaders[1], fid_model, 'fid', device)
                 fid_score = calculate_fid(real_fid_feats, gen_fid_feats)
                 
-                # --- Calculate FVD ---
+                # --- Calculate FVD (first 16 frames of sampled videos) ---
                 fvd_loaders = build_loaders('fvd', paths, fvd_data_cfg)
                 real_fvd_feats = get_features(fvd_loaders[0], fvd_model, 'fvd', device, model_subtype=fvd_model_cfg.type)
                 gen_fvd_feats = get_features(fvd_loaders[1], fvd_model, 'fvd', device, model_subtype=fvd_model_cfg.type)
-                fvd_score = calculate_fid(real_fvd_feats, gen_fvd_feats) # FID function is reused for FVD calculation
+                fvd_score = calculate_fid(real_fvd_feats, gen_fvd_feats)
 
                 # --- Task 3: Log Results (Structured JSON) ---
                 log_entry = {
