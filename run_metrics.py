@@ -7,18 +7,20 @@ import sys
 from omegaconf import OmegaConf
 import torch
 from rich.progress import track
+import cv2
 
-# --- Import logic from fid_metrics ---
+# --- Import logic from local files ---
 from fid_metrics import (
     build_loaders,
     build_model,
     calculate_fid,
     postprocess_i2d_pred,
 )
+from gen_video import VideoGenerator
 
 # --- Constants ---
 REAL_DATA_ROOT = 'video_data_sample'
-GEN_DATA_ROOT = 'video_data_gen'
+GEN_DATA_ROOT = 'video_data_gen_finetune'
 LOG_FILE = 'metrics_log.txt'
 NUM_VIDEOS_TO_PROCESS = 5 # Limit number of videos for faster debugging
 
@@ -29,6 +31,16 @@ def parse_metrics_from_string(output):
     fid = float(fid_match.group(1)) if fid_match else None
     fvd = float(fvd_match.group(1)) if fvd_match else None
     return fid, fvd
+
+def get_first_frame(video_path):
+    """Extracts the first frame of a video and returns it as a numpy array."""
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        print(f"Warning: Could not read first frame from {video_path}")
+        return None
+    return frame
 
 def get_features(dl, model, metric_type, device, model_subtype="styleganv"):
     """Extracts features for a given dataloader and model."""
@@ -74,17 +86,20 @@ def run():
     fvd_model = build_model('fvd', fvd_model_cfg).to(device).eval()
     print("Models loaded.")
 
+    # --- Initialize Video Generator ---
+    video_generator = VideoGenerator()
+
     # --- Data and Configs ---
     all_results = {}
     datasets = [d for d in os.listdir(REAL_DATA_ROOT) if os.path.isdir(os.path.join(REAL_DATA_ROOT, d))]
     
     fid_data_cfg = OmegaConf.create({
         "dataset": {"resize_shape": [256, 512]},
-        "batch_size": 64, "num_workers": 16
+        "batch_size": 16, "num_workers": 1
     })
     fvd_data_cfg = OmegaConf.create({
         "dataset": {"sequence_length": 16, "resize_shape": [224, 224]},
-        "batch_size": 4, "num_workers": 16
+        "batch_size": 4, "num_workers": 1
     })
 
     for dataset in datasets:
@@ -102,10 +117,26 @@ def run():
         for real_video_path in video_files:
             video_filename = os.path.basename(real_video_path)
             gen_video_path = os.path.join(gen_dataset_path, video_filename)
+            
+            # Associated text file
+            text_path = os.path.splitext(real_video_path)[0] + '.txt'
+            prompt_text = "N/A"
+            if os.path.exists(text_path):
+                with open(text_path, 'r') as f:
+                    prompt_text = f.read().strip()
 
-            print(f"  Processing video: {video_filename}")
-            # --- Task 1: Generate Video (Simulated) ---
-            shutil.copy(real_video_path, gen_video_path)
+            print(f"  Processing video: {video_filename} with prompt: '{prompt_text[:30]}...'")
+            
+            # --- Task 1: Generate Video ---
+            first_frame = get_first_frame(real_video_path)
+            generation_successful = False
+            if first_frame is not None:
+                generation_successful = video_generator.generate(first_frame, prompt_text, gen_video_path)
+
+            if not generation_successful:
+                print("    Video generation failed. Falling back to copying original video.")
+                shutil.copy(real_video_path, gen_video_path)
+
 
             try:
                 paths = [real_video_path, gen_video_path]
