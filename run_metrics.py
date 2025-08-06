@@ -65,6 +65,48 @@ def get_features(dl, model, metric_type, device, model_subtype="styleganv"):
         feats.append(pred.cpu().numpy())
     return np.concatenate(feats, axis=0)
 
+def sample_video_frames(input_path, output_path, num_frames):
+    """
+    Reads a video and writes a new video file with `num_frames` uniformly sampled frames.
+    """
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        print(f"    Error: Could not open video file for reading: {input_path}")
+        return False
+    
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:
+        print(f"    Warning: Video has no frames or invalid metadata: {input_path}")
+        return False
+        
+    # Get video properties for the writer
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    if not out.isOpened():
+        print(f"    Error: Could not open video file for writing: {output_path}")
+        cap.release()
+        return False
+
+    # Generate indices of frames to sample
+    sample_indices = np.linspace(0, total_frames - 1, num=num_frames, dtype=int)
+    
+    for frame_idx in sample_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if ret:
+            out.write(frame)
+        else:
+            # If we fail to read a frame, it might be the end of a corrupted file
+            print(f"    Warning: Could not read frame {frame_idx} from {input_path}. Output may have fewer frames.")
+            continue
+    
+    cap.release()
+    out.release()
+    return True
 
 def run(args):
     """Main function to generate videos, compute metrics, and log results."""
@@ -114,10 +156,14 @@ def run(args):
     
     fid_data_cfg = OmegaConf.create({
         "dataset": {"resize_shape": [256, 512]},
-        "batch_size": 16, "num_workers": 1
+        "batch_size": 4, "num_workers": 1
     })
     fvd_data_cfg = OmegaConf.create({
-        "dataset": {"sequence_length": 16, "resize_shape": [224, 224]},
+        "dataset": {
+            "sequence_length": 16, 
+            "resize_shape": [224, 224],
+            "no_overlap": False  # Enable overlapping sequences for better data utilization
+        },
         "batch_size": 4, "num_workers": 1
     })
 
@@ -152,19 +198,50 @@ def run(args):
 
             print(f"  Processing video: {video_filename} with prompt: '{prompt_text[:30]}...'")
             
-            # --- Task 1: Generate Video ---
-            first_frame = get_first_frame(real_video_path)
-            generation_successful = False
-            if first_frame is not None:
-                generation_successful = video_generator.generate(first_frame, prompt_text, gen_video_path)
+            # --- Task 1: Generate Video (if it doesn't exist) ---
+            if not os.path.exists(gen_video_path):
+                first_frame = get_first_frame(real_video_path)
+                generation_successful = False
+                if first_frame is not None:
+                    generation_successful = video_generator.generate(first_frame, prompt_text, gen_video_path)
 
-            if not generation_successful:
-                print("    Video generation failed. Falling back to copying original video.")
-                shutil.copy(real_video_path, gen_video_path)
+                if not generation_successful:
+                    print("    Video generation failed. Falling back to copying original video.")
+                    shutil.copy(real_video_path, gen_video_path)
+            else:
+                print(f"    Found existing generated video, skipping generation: {gen_video_path}")
 
-
+            temp_files_to_clean = []
             try:
-                paths = [real_video_path, gen_video_path]
+                # --- Frame Count Matching ---
+                real_cap = cv2.VideoCapture(real_video_path)
+                real_frame_count = int(real_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                real_cap.release()
+
+                gen_cap = cv2.VideoCapture(gen_video_path)
+                gen_frame_count = int(gen_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                gen_cap.release()
+                
+                target_frame_count = min(real_frame_count, gen_frame_count)
+
+                path_for_real = real_video_path
+                path_for_gen = gen_video_path
+
+                if real_frame_count > target_frame_count:
+                    print(f"    Sampling real video from {real_frame_count} to {target_frame_count} frames.")
+                    path_for_real = os.path.join(gen_dataset_path, f"temp_real_{video_filename}")
+                    temp_files_to_clean.append(path_for_real)
+                    if not sample_video_frames(real_video_path, path_for_real, target_frame_count):
+                        raise IOError(f"Failed to sample real video: {real_video_path}")
+                
+                if gen_frame_count > target_frame_count:
+                    print(f"    Sampling generated video from {gen_frame_count} to {target_frame_count} frames.")
+                    path_for_gen = os.path.join(gen_dataset_path, f"temp_gen_{video_filename}")
+                    temp_files_to_clean.append(path_for_gen)
+                    if not sample_video_frames(gen_video_path, path_for_gen, target_frame_count):
+                        raise IOError(f"Failed to sample generated video: {gen_video_path}")
+
+                paths = [path_for_real, path_for_gen]
                 
                 # --- Calculate FID ---
                 fid_loaders = build_loaders('fid', paths, fid_data_cfg)
@@ -200,6 +277,12 @@ def run(args):
                 }
                 log_handle.write(json.dumps(log_entry) + '\n')
                 log_handle.flush()
+            
+            finally:
+                # --- Cleanup ---
+                for temp_file in temp_files_to_clean:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
     
     log_handle.close()
 
