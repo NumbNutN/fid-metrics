@@ -46,10 +46,10 @@ def save_videos(videos, width, height, fps=8):
     for worker in workers:
         worker.join()
 
-def worker(port, headers, data, verify, result_queue):
+def worker(ip_address, port, headers, data, verify, result_queue):
     try:
-        logger.info(f"Waiting for response from port {port}")
-        response = requests.post(f"https://172.16.204.187:{port}", headers=headers, data=json.dumps(data), verify=verify)
+        logger.info(f"Waiting for response from {ip_address}:{port}")
+        response = requests.post(f"https://{ip_address}:{port}", headers=headers, data=json.dumps(data), verify=verify)
         response.raise_for_status()
         result_queue.put(response.json())
         logger.info(f"Response from port {port} got")
@@ -61,7 +61,8 @@ def worker(port, headers, data, verify, result_queue):
 # --- Main Generator Class ---
 
 class VideoGenerator:
-    def __init__(self, ports=[23991]):
+    def __init__(self, ip_address='172.16.204.187', ports=[23991]):
+        self.ip_address = ip_address
         self.ports = ports
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -84,7 +85,7 @@ class VideoGenerator:
                 "seed": 1234, # Using a fixed seed for consistency
                 "password": "r49h8fieuwK"
             }
-            p = multiprocessing.Process(target=worker, args=(port, headers, data, False, result_queue))
+            p = multiprocessing.Process(target=worker, args=(self.ip_address, port, headers, data, False, result_queue))
             jobs.append(p)
             p.start()
 

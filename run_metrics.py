@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 import torch
 from rich.progress import track
 import cv2
+import argparse
 
 # --- Import logic from local files ---
 from fid_metrics import (
@@ -20,8 +21,7 @@ from gen_video import VideoGenerator
 
 # --- Constants ---
 REAL_DATA_ROOT = 'video_data_sample'
-GEN_DATA_ROOT = 'video_data_gen_finetune'
-LOG_FILE = 'metrics_log.txt'
+# GEN_DATA_ROOT and LOG_FILE will be handled by argparse
 NUM_VIDEOS_TO_PROCESS = 5 # Limit number of videos for faster debugging
 
 def parse_metrics_from_string(output):
@@ -65,9 +65,12 @@ def get_features(dl, model, metric_type, device, model_subtype="styleganv"):
     return np.concatenate(feats, axis=0)
 
 
-def run():
+def run(args):
     """Main function to generate videos, compute metrics, and log results."""
-    # --- Setup ---
+    # --- Setup from args ---
+    GEN_DATA_ROOT = args.gen_data_root
+    LOG_FILE = args.log_file
+    
     os.makedirs(GEN_DATA_ROOT, exist_ok=True)
     with open(LOG_FILE, 'w') as log:
         log.write("--- Metrics Calculation Log ---\n\n")
@@ -87,7 +90,7 @@ def run():
     print("Models loaded.")
 
     # --- Initialize Video Generator ---
-    video_generator = VideoGenerator()
+    video_generator = VideoGenerator(ip_address=args.ip_address, ports=args.ports)
 
     # --- Data and Configs ---
     all_results = {}
@@ -194,4 +197,31 @@ def run():
         log.write(final_summary)
 
 if __name__ == '__main__':
-    run()
+    parser = argparse.ArgumentParser(description="Run FID and FVD metrics on generated videos.")
+    parser.add_argument(
+        '--gen_data_root', 
+        type=str, 
+        default='video_data_gen_finetune',
+        help='Directory to save generated videos. Defaults to video_data_gen_finetune.'
+    )
+    parser.add_argument(
+        '--log_file',
+        type=str,
+        default='metrics_log.txt',
+        help='File to write logs and results to. Defaults to metrics_log.txt.'
+    )
+    parser.add_argument(
+        '--ip_address',
+        type=str,
+        default='172.16.204.187',
+        help='IP address of the video generation server.'
+    )
+    parser.add_argument(
+        '--ports',
+        nargs='+',
+        type=int,
+        default=[23991],
+        help='List of ports for the video generation server.'
+    )
+    args = parser.parse_args()
+    run(args)
