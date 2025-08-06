@@ -88,13 +88,5 @@ def main(cfg: DictConfig):
                         else:
                             pred = model(x)
 
-                feats[i].append(pred.cpu().numpy())
-            feats[i] = np.concatenate(feats[i], axis=0)
-        print("feats[0].shape", feats[0].shape)
-        print("feats[1].shape", feats[1].shape)
-        fid = calculate_fid(*feats)
-        print(f'{type.upper()}: {fid}')
-
-
 if __name__ == '__main__':
     main()
