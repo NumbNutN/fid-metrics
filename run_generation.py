@@ -68,19 +68,29 @@ def run_generation(args):
     """Main function to set up and run the video generation processes."""
     os.makedirs(args.gen_data_root, exist_ok=True)
 
-    # --- Checkpoint Loading from simple CSV log ---
+    # --- Checkpoint Loading and Log Cleanup ---
     completed_videos = set()
+    latest_statuses = {}
     if os.path.exists(args.log_file):
         print(f"Resuming from existing log file: {args.log_file}")
         with open(args.log_file, 'r') as f:
             for line in f:
                 try:
-                    # Expecting format: dataset,video_filename,status
                     parts = line.strip().split(',')
-                    if len(parts) == 3 and parts[2] == 'completed':
-                        completed_videos.add((parts[0], parts[1]))
-                except IndexError:
+                    if len(parts) == 3:
+                        # Overwrite with the latest status found in the log
+                        latest_statuses[(parts[0], parts[1])] = parts[2]
+                except (IndexError, ValueError):
                     continue # Skip corrupted lines
+        
+        # Now, rebuild the set of completed videos and clean the log
+        if latest_statuses:
+            with open(args.log_file, 'w') as f: # Overwrite with clean log
+                for (dataset, video_filename), status in latest_statuses.items():
+                    f.write(f"{dataset},{video_filename},{status}\n")
+                    if status == 'completed':
+                        completed_videos.add((dataset, video_filename))
+
         print(f"Found {len(completed_videos)} completed videos to skip.")
 
     # --- Create Task Queue ---
@@ -89,7 +99,8 @@ def run_generation(args):
     
     total_tasks = 0
     datasets = [d for d in os.listdir(REAL_DATA_ROOT) if os.path.isdir(os.path.join(REAL_DATA_ROOT, d))]
-    for dataset in datasets:
+    # reverse the datasets
+    for dataset in reversed(datasets):
         real_dataset_path = os.path.join(REAL_DATA_ROOT, dataset)
         video_files = sorted(glob.glob(os.path.join(real_dataset_path, '*.mp4')))
 

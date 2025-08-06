@@ -335,7 +335,8 @@ def run(args):
     ports_cycle = cycle(args.ports)
     
     total_tasks = 0
-    for dataset in datasets:
+    # reverse the datasets
+    for dataset in reversed(datasets):
         real_dataset_path = os.path.join(REAL_DATA_ROOT, dataset)
         video_files = sorted(glob.glob(os.path.join(real_dataset_path, '*.mp4')))
         
