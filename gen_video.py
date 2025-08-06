@@ -13,8 +13,7 @@ import urllib3
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Helper Functions (from original file) ---
-
+# --- Helper Functions ---
 def save_video(ffmpeg_cmd, images):
     try:
         proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -46,73 +45,48 @@ def save_videos(videos, width, height, fps=8):
     for worker in workers:
         worker.join()
 
-def worker(ip_address, port, headers, data, verify, result_queue):
-    try:
-        logger.info(f"Waiting for response from {ip_address}:{port}")
-        response = requests.post(f"https://{ip_address}:{port}", headers=headers, data=json.dumps(data), verify=verify)
-        response.raise_for_status()
-        result_queue.put(response.json())
-        logger.info(f"Response from port {port} got")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request to port {port} failed: {e}")
-        result_queue.put(None)
-
-
 # --- Main Generator Class ---
-
 class VideoGenerator:
-    def __init__(self, ip_address='172.16.204.187', ports=[23991]):
+    def __init__(self, ip_address='172.16.204.187'):
         self.ip_address = ip_address
-        self.ports = ports
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    def generate(self, first_frame_image, prompt_text, output_path):
+    def generate(self, port, first_frame_image, prompt_text, output_path):
         """
-        Generates a video by calling an external service.
+        Generates a video by calling an external service on a specific port.
         Returns True on success, False on failure.
         """
-        logger.info(f"Attempting to generate video for prompt: '{prompt_text}'")
+        logger.info(f"Attempting to generate video for prompt: '{prompt_text}' on port {port}")
         
         headers = {"Content-Type": "application/json"}
-        # Use a multiprocessing queue to get results from worker processes
-        result_queue = multiprocessing.Manager().Queue()
-        jobs = []
-
-        for port in self.ports:
-            data = {
-                "prompt": prompt_text, 
-                "img": b64encode(cv2.imencode(".jpg", first_frame_image, [int(cv2.IMWRITE_JPEG_QUALITY), 100])[1].tobytes()).decode("utf-8"), 
-                "seed": 1234, # Using a fixed seed for consistency
-                "password": "r49h8fieuwK"
-            }
-            p = multiprocessing.Process(target=worker, args=(self.ip_address, port, headers, data, False, result_queue))
-            jobs.append(p)
-            p.start()
-
-        for p in jobs:
-            p.join()
-
-        responses = []
-        while not result_queue.empty():
-            res = result_queue.get()
-            if res:
-                responses.append(res)
-
-        if not responses or not responses[0]:
-            logger.error("Video generation failed. No valid responses from server.")
-            return False
+        data = {
+            "prompt": prompt_text, 
+            "img": b64encode(cv2.imencode(".jpg", first_frame_image, [int(cv2.IMWRITE_JPEG_QUALITY), 100])[1].tobytes()).decode("utf-8"), 
+            "seed": 1234, # Using a fixed seed for consistency
+            "password": "r49h8fieuwK"
+        }
 
         try:
+            response = requests.post(f"https://{self.ip_address}:{port}", headers=headers, data=json.dumps(data), verify=False, timeout=120)
+            response.raise_for_status()
+            response_data = response.json()
+            
+            if not response_data:
+                logger.error(f"Video generation failed on port {port}: Empty response from server.")
+                return False
+
             videos_to_save = {}
-            sample_image = responses[0][0]
+            sample_image = response_data[0]
             height, width, _ = cv2.imdecode(np.frombuffer(b64decode(sample_image), np.uint8), cv2.IMREAD_COLOR).shape
             
-            # Save the first successful response to the specified output path
-            videos_to_save[output_path] = responses[0]
+            videos_to_save[output_path] = response_data
             save_videos(videos_to_save, width, height)
             
-            logger.info(f"Video policy generated at: {output_path}")
+            logger.info(f"Video policy generated at: {output_path} using port {port}")
             return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request to port {port} failed: {e}")
+            return False
         except Exception as e:
-            logger.error(f"Failed to process server response and save video: {e}")
+            logger.error(f"Failed to process server response from port {port}: {e}")
             return False
