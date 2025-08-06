@@ -9,6 +9,7 @@ import torch
 from rich.progress import track
 import cv2
 import argparse
+import json
 
 # --- Import logic from local files ---
 from fid_metrics import (
@@ -72,8 +73,23 @@ def run(args):
     LOG_FILE = args.log_file
     
     os.makedirs(GEN_DATA_ROOT, exist_ok=True)
-    with open(LOG_FILE, 'w') as log:
-        log.write("--- Metrics Calculation Log ---\n\n")
+
+    # --- Checkpoint Loading ---
+    completed_videos = set()
+    if os.path.exists(LOG_FILE):
+        print(f"Resuming from existing log file: {LOG_FILE}")
+        with open(LOG_FILE, 'r') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    if data.get('status') == 'completed':
+                        completed_videos.add((data['dataset'], data['video_filename']))
+                except json.JSONDecodeError:
+                    continue # Skip corrupted lines
+        print(f"Found {len(completed_videos)} completed videos to skip.")
+
+    # Open log file in append mode
+    log_handle = open(LOG_FILE, 'a')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -119,6 +135,12 @@ def run(args):
 
         for real_video_path in video_files:
             video_filename = os.path.basename(real_video_path)
+            
+            # --- Checkpoint Skip ---
+            if (dataset, video_filename) in completed_videos:
+                print(f"  Skipping already processed video: {video_filename}")
+                continue
+
             gen_video_path = os.path.join(gen_dataset_path, video_filename)
             
             # Associated text file
@@ -156,24 +178,47 @@ def run(args):
                 gen_fvd_feats = get_features(fvd_loaders[1], fvd_model, 'fvd', device, model_subtype=fvd_model_cfg.type)
                 fvd_score = calculate_fid(real_fvd_feats, gen_fvd_feats) # FID function is reused for FVD calculation
 
-                # --- Task 3: Log Results ---
-                log_entry = f"Dataset: {dataset}, Video: {video_filename}, FID: {fid_score:.4f}, FVD: {fvd_score:.4f}\n"
+                # --- Task 3: Log Results (Structured JSON) ---
+                log_entry = {
+                    "dataset": dataset,
+                    "video_filename": video_filename,
+                    "fid_score": fid_score,
+                    "fvd_score": fvd_score,
+                    "status": "completed"
+                }
+                log_handle.write(json.dumps(log_entry) + '\n')
+                log_handle.flush() # Ensure it's written immediately
                 print(f"    FID: {fid_score:.4f}, FVD: {fvd_score:.4f}")
-                with open(LOG_FILE, 'a') as log_file:
-                    log_file.write(log_entry)
-                
-                all_results[dataset]['fid'].append(fid_score)
-                all_results[dataset]['fvd'].append(fvd_score)
 
             except Exception as e:
                 print(f"      Error calculating metrics for {video_filename}: {e}")
-                import traceback
-                with open(LOG_FILE, 'a') as log_file:
-                    log_file.write(f"Dataset: {dataset}, Video: {video_filename}, ERROR: Exception occurred.\n")
-                    traceback.print_exc(file=log_file)
+                log_entry = {
+                    "dataset": dataset,
+                    "video_filename": video_filename,
+                    "error": str(e),
+                    "status": "failed"
+                }
+                log_handle.write(json.dumps(log_entry) + '\n')
+                log_handle.flush()
     
-    # --- Task 3: Final Analysis ---
+    log_handle.close()
+
+    # --- Task 3: Final Analysis (from log file) ---
     print("\n--- Final Statistics ---")
+    all_results = {}
+    with open(LOG_FILE, 'r') as f:
+        for line in f:
+            try:
+                data = json.loads(line)
+                if data.get('status') == 'completed':
+                    dset = data['dataset']
+                    if dset not in all_results:
+                        all_results[dset] = {'fid': [], 'fvd': []}
+                    all_results[dset]['fid'].append(data['fid_score'])
+                    all_results[dset]['fvd'].append(data['fvd_score'])
+            except (json.JSONDecodeError, KeyError):
+                continue
+    
     final_summary = "\n\n--- Final Statistics ---\n"
     for dataset, results in all_results.items():
         if results['fid'] and results['fvd']:
@@ -207,8 +252,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--log_file',
         type=str,
-        default='metrics_log.txt',
-        help='File to write logs and results to. Defaults to metrics_log.txt.'
+        default='metrics_log.jsonl',
+        help='File to write logs and results to (JSON Lines format). Defaults to metrics_log.jsonl.'
     )
     parser.add_argument(
         '--ip_address',
