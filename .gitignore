@@ -160,3 +160,6 @@ cython_debug/
 #.idea/
 
 outputs/
+
+video_data_sample/
+video_data_gen/
